@@ -63,7 +63,21 @@ def scraping():
 
   # CHECK IF MAY PASOK TODAY
   today = datetime.datetime.now()
-  if scraped_dates[0] == (int(today.strftime("%m")),today.day):
+  tm = int(today.strftime("%m"))
+  td = today.day
+  for i in range(len(scraped_dates)):
+    sdate = scraped_dates[i]
+    if sdate[0] < tm:
+      scraped_dates.pop(i)
+      i-=1
+    elif sdate[0] == tm:
+      if sdate[1] < td:
+        scraped_dates.pop(i)
+        i-=1
+    else:
+      break
+
+  if scraped_dates[0] == (tm,td):
     scraped_dates.pop(0)
     noclasses = True
 
