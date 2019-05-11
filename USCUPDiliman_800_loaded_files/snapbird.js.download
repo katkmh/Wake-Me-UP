@@ -1,0 +1,788 @@
+import { getDirectMessages, resetDirectMessages } from './dms.js';
+import twitterlib from './twitterlib.js';
+
+/*globals $, ga */
+
+/**
+ * Utilities
+ */
+
+var limits = {
+  timeline: {
+    limit: 3200,
+    rate: 900,
+  },
+  favs: {
+    limit: 3200,
+    rate: 75,
+  },
+  withfriends: {
+    limit: 800,
+    rate: 150,
+  },
+  mentions: {
+    limit: 800,
+    rate: 75,
+  },
+  dm_sent: {
+    limit: 200,
+    rate: 15,
+  },
+  dm: {
+    limit: 200,
+    rate: 15,
+  },
+  dms: {
+    limit: 2000,
+    rate: 20,
+  },
+};
+
+var photoURLs = new RegExp('\\.(jpg|jpeg|png|gif)$');
+
+// https://github.com/remy/undefsafe@0.0.3
+function undefsafe(obj, path) {
+  var parts = path.split('.');
+  var key = null;
+  var type = typeof obj;
+
+  // we're dealing with a primitive
+  if (type !== 'object' && type !== 'function') {
+    return obj;
+  } else if (path.trim() === '') {
+    return obj;
+  }
+
+  while ((key = parts.shift())) {
+    obj = obj[key];
+    if (obj === undefined || obj === null) {
+      break;
+    }
+  }
+
+  // if we have a null object, make sure it's the one the user was after,
+  // if it's not (i.e. parts has a length) then give undefined back.
+  if (obj === null && parts.length !== 0) {
+    obj = undefined;
+  }
+
+  return obj;
+}
+
+function escapeTags(s) {
+  return (s || '').replace(/[<>]/g, function(m) {
+    return { '<': '&lt;' }[m] || '&gt;';
+  });
+}
+
+function getVideo(embeds, tweet, id) {
+  var entities = undefsafe(tweet, 'extended_entities.media');
+  if (!entities) {
+    return;
+  }
+
+  if (entities.length) {
+    var media = entities.filter(function(media) {
+      return media.id === id;
+    });
+
+    if (media.length === 0) {
+      return false;
+    }
+
+    media = media.pop();
+
+    if (media.type === 'animated_gif') {
+      var src = undefsafe(media, 'video_info.variants.0');
+      if (src) {
+        embeds.push(
+          '<video class="pic" autoplay loop muted src="' +
+            src.url +
+            // '?' + Math.random() +
+            '" width="' +
+            media.sizes.large.w +
+            '"></video>'
+        );
+        return true;
+      }
+    }
+  }
+}
+
+function getEmbed(embeds, data, urlData) {
+  var url = urlData.expanded_url;
+
+  if (getVideo(embeds, data, urlData.id)) {
+    return;
+  }
+
+  if (photoURLs.test(url)) {
+    embeds.push(
+      '<a target="_blank" href="' +
+        url +
+        '"><img class="pic" src="' +
+        url +
+        '" /></a>'
+    );
+  } else if (
+    urlData.media_url_https &&
+    photoURLs.test(urlData.media_url_https)
+  ) {
+    embeds.push(
+      '<a target="_blank" href="' +
+        url +
+        '"><img class="pic" src="' +
+        urlData.media_url_https +
+        '" /></a>'
+    );
+  } else if (url.indexOf('instagram') !== -1) {
+    if (url.split('').pop() !== '/') {
+      url += '/';
+    }
+    embeds.push(
+      '<a target="_blank" href="' +
+        url +
+        '"><img class="pic" id="pic' +
+        data.id_str +
+        '" src="' +
+        url +
+        'media?size=l"></a>'
+    );
+  }
+}
+
+// based on twitter.com list of tweets, most common format for tweets
+twitterlib.render = function(tweet) {
+  var embeds = [];
+  var _getEmbed = getEmbed.bind(null, embeds, tweet);
+
+  if (tweet.entities) {
+    if (tweet.entities.media) {
+      var media = undefsafe(tweet, 'extended_entities.media');
+      if (media && media.length) {
+        media.forEach(_getEmbed);
+      } else {
+        tweet.entities.media.forEach(_getEmbed);
+      }
+    } else if (tweet.entities.urls) {
+      tweet.entities.urls.forEach(_getEmbed);
+    }
+  }
+
+  var html = '<li><div class="tweet">';
+  html +=
+    '<div class="vcard"><a href="http://twitter.com/' +
+    tweet.user.screen_name +
+    '" class="url"><img style="height: 48px; width: 48px;" alt="' +
+    tweet.user.name +
+    '" class="photo fn" height="48" src="' +
+    tweet.user.profile_image_url_https +
+    '" width="48" /></a></div>';
+  html += '<div class="hentry"><span class="entry-content">';
+
+  html += twitterlib.ify.clean(twitterlib.expandLinks(tweet));
+  html +=
+    '</span> <span class="meta entry-meta"><a href="http://twitter.com/' +
+    tweet.user.screen_name;
+  html +=
+    '/status/' +
+    tweet.id_str +
+    '" class="entry-date" rel="bookmark"> <span class="published" title="';
+  html +=
+    twitterlib.time.datetime(tweet.created_at) +
+    '">' +
+    twitterlib.time.relative(tweet.created_at) +
+    '</span></a>';
+
+  html += '<strong> <a href="http://twitter.com/';
+  html += tweet.user.screen_name + '" ';
+  html +=
+    'title="' +
+    tweet.user.name +
+    '">@' +
+    tweet.user.screen_name +
+    '</a></strong> ';
+  html += tweet.user.name;
+  if (tweet.retweetedby)
+    html += ' <span>retweeted by @' + tweet.retweetedby.screen_name + '</span>';
+  html += '</span></div>';
+
+  if (embeds.length) {
+    html += '<div class="embeds">' + embeds.join(' ') + '</div>';
+  }
+
+  html += '</div></li>';
+
+  return html;
+};
+
+/**
+ * Twitterlib setup
+ * This happens after login because we have to have the user's token to
+ * authenticate them with the proxy.
+ */
+
+var setupTwitterlib = (function() {
+  twitterlib.cache(true);
+  var base = '/twoxy';
+  return function(data) {
+    // Setup twitterlib
+    var defaults = {
+      token: data.token,
+      token_secret: data.token_secret,
+      proxy_client_id: data.proxy_client_id,
+    };
+    // twitterlib.custom('search', base + '/search/tweets.json?q=%search%&rpp=%limit|100%&since_id=%since|remove%&result_type=recent&include_entities=true&token=%token%&token_secret=%token_secret%&proxy_client_id=%proxy_client_id%', defaults);
+    twitterlib.custom(
+      'timeline',
+      base +
+        '/statuses/user_timeline.json?tweet_mode=extended&screen_name=%user%&count=%limit|200%&page=%page|1%&since_id=%since|remove%include_rts=%rts|false%&include_entities=true&token=%token%&token_secret=%token_secret%&proxy_client_id=%proxy_client_id%',
+      defaults
+    );
+    twitterlib.custom(
+      'list',
+      base +
+        '/lists/statuses.json?slug=%list_name%&owner_screen_name=%user%&count=%limit|200%&page=%page|1%&since_id=%since|remove%include_rts=%rts|false%&include_entities=true&token=%token%&token_secret=%token_secret%&proxy_client_id=%proxy_client_id%',
+      defaults
+    );
+    twitterlib.custom(
+      'favs',
+      base +
+        '/favorites/list.json?tweet_mode=extended&screen_name=%user%&count=%limit|200%&include_entities=true&skip_status=true&page=%page|1%&since_id=%since|remove%&token=%token%&token_secret=%token_secret%&proxy_client_id=%proxy_client_id%',
+      defaults
+    );
+    twitterlib.custom(
+      'withfriends',
+      base +
+        '/statuses/home_timeline.json?tweet_mode=extended&screen_name=%user%&count=%limit|200%&page=%page|1%&since_id=%since|remove%include_rts=%rts|false%&include_entities=true&token=%token%&token_secret=%token_secret%&proxy_client_id=%proxy_client_id%',
+      defaults
+    );
+    twitterlib.custom(
+      'dms',
+      '/api/dms?count=%limit|50%&max_entry_id=%since|remove%&q=%search%&filter=%filter%',
+      defaults
+    );
+    twitterlib.custom(
+      'mentions',
+      base +
+        '/statuses/mentions_timeline.json?tweet_mode=extended&count=%limit|200%&page=%page|1%&since_id=%since|remove%include_rts=%rts|false%&include_entities=true&token=%token%&token_secret=%token_secret%&proxy_client_id=%proxy_client_id%',
+      defaults
+    );
+  };
+})();
+
+/**
+ * Snapbird
+ */
+
+var user = {};
+
+var $searchForm = $('#form'),
+  $type = $('#type'),
+  $screen_name = $('#screen_name'),
+  $search = $('#search'),
+  $tweets = $('#tweets ul'),
+  $body = $('body'),
+  aside = $('aside'),
+  $screen_name_label = $('#screen_name_label'),
+  state,
+  screen_name,
+  limit = 100, // performs better and avoids 502!
+  pageMax = null,
+  total_tweets = 0,
+  total_searched = 0,
+  timer = null,
+  statusTop = null,
+  type_string = {
+    timeline: 'tweets',
+    favs: 'favourites',
+    withfriends: 'friends&rsquo; tweets',
+    mentions: 'mentions',
+    list: 'member tweets',
+    dms: 'your direct messages',
+    dm: 'received direct messages',
+    dm_sent: 'sent direct messages',
+  };
+
+$(function() {
+  var msie6 = $.browser == 'msie' && $.browser.version < 7;
+  if (!msie6) {
+    $(window).scroll(function() {
+      var y;
+      // what the y position of the scroll is
+      if (statusTop != null) {
+        y = $(this).scrollTop();
+
+        // whether that's below the form
+        if (y >= statusTop) {
+          // if so, ad the fixed class
+          $('#tweets aside').addClass('fixed');
+        } else {
+          // otherwise remove it
+          $('#tweets aside').removeClass('fixed');
+        }
+      }
+    });
+  }
+});
+
+/**
+ * Search cancelling
+ */
+
+function cancelSearch() {
+  clearTimeout(timer);
+  $body.removeClass('loading');
+  twitterlib.cancel();
+}
+
+// Escape key
+$body.keyup(function(event) {
+  if (event.which == 27) {
+    cancelSearch();
+
+    if ($body.hasClass('auth')) {
+      $body.removeClass('auth');
+    }
+  }
+});
+
+// Button
+$('#cancel').click(cancelSearch);
+
+/**
+ * Login & authentication
+ * The session contains the user's Twitter tokens (token and token_secret) as
+ * well as the proxy client id (proxy_client_id). It's held server side - the
+ * client side accesses it by hitting the /api/user URL.
+ */
+
+var isLoggedIn = function() {
+  return $body.hasClass('logged-in');
+};
+
+var getSession = function(cb) {
+  $.get('/api/user', function(data) {
+    cb(!!data.token, data);
+  });
+};
+
+var requestLogin = function(cb) {
+  getSession(function(loggedIn, data) {
+    if (!loggedIn) {
+      $body.one('click', function() {
+        $body.removeClass('auth');
+      });
+
+      return $body.addClass('auth');
+    }
+    $body.addClass('logged-in').removeClass('logged-out auth');
+    cb && cb(data);
+  });
+};
+
+/**
+ * Snapbird
+ */
+
+var $status = $('#tweets aside p');
+function setStatus(matched, searched, oldest) {
+  var date = new Date(Date.parse(oldest)),
+    hour = date.getHours(),
+    niceSearched = (searched + '').replace(/([0-9]+)([0-9]{3})/, '$1,$2');
+
+  $status.eq(0).text(matched + (matched == 1 ? ' tweet' : ' tweets'));
+  // cheap thousand separator
+  $status.eq(1).text(niceSearched + ' searched');
+
+  if (oldest != undefined) {
+    $status.eq(2).text(twitterlib.time.date(date));
+
+    if (hour > 6 && hour < 12) {
+      $('#time').text('morning');
+    } else if (hour < 18) {
+      $('#time').text('afternoon');
+    } else if (hour < 22) {
+      $('#time').text('evening');
+    } else {
+      $('#time').text('night');
+    }
+  }
+
+  getSession(function(loggedIn, user) {
+    if (loggedIn) {
+      $('#requests-left').html(
+        '<h3>Requests remaining</h3><p>' + user.requestsLeft + '</p>'
+      );
+      $('#more .upgrade-info span').text(user.requestsLeft);
+    }
+  });
+
+  $('#more p.searched').text(niceSearched + ' tweets searched.');
+}
+
+function updateLoading(type) {
+  var inc = limit;
+  if (type == 'favs') inc = 20;
+  $('#loading .num').text(total_searched + '-' + (total_searched + inc));
+}
+
+function getPermalink(screen_name, type, search) {
+  var permalink =
+    '/' +
+    (screen_name || $screen_name.val() || user.screen_name) +
+    '/' +
+    (type || $type.val()) +
+    '/' +
+    encodeURIComponent(search || $search.val());
+  if (permalink.match(/undefined/)) return '';
+  // $('#permalink').attr('href', permalink);
+  return permalink;
+}
+
+/**
+ * Handle the query type being updated
+ */
+$('#type')
+  .bind('change keyup', function() {
+    const value = this.value;
+
+    var label = 'You';
+    var disabled = true;
+    if (value === 'dms') {
+      label = 'With?';
+      disabled = false;
+    } else if (value === 'timeline' || value === 'favs') {
+      label = 'Who?';
+      disabled = false;
+    }
+
+    $screen_name_label.text(label);
+    $screen_name.attr('disabled', disabled);
+    if (disabled) {
+      $screen_name.val(user.screen_name);
+    } else {
+      $screen_name.val('');
+    }
+    // getPermalink();
+  })
+  .trigger('change');
+
+/**
+ * Search
+ */
+
+$('#more a').on('click', function() {
+  pageMax = 5;
+  $searchForm.submit();
+  return false;
+});
+
+function processTweets(data, options) {
+  const type = $type.val();
+  const filter = twitterlib.filter.format(options.filter);
+  var currentAPIState = limits[type].limit;
+
+  aside.removeAttr('data-error');
+  aside.off('click');
+  if (options.originalTweets.error) {
+    // something went wrong
+    var error = options.originalTweets;
+    if (error.meta && error.meta.paymentRequired) {
+      $('#more > p, #more > a').hide();
+      $('body').addClass('payment-required');
+    }
+
+    if (error.meta.message) {
+      $('#extra-message')
+        .text(error.meta.message)
+        .show();
+    } else {
+      $('#extra-message')
+        .text('')
+        .hide();
+    }
+
+    aside.attr('data-error', error.meta.message || error.meta.status);
+
+    if (error.meta.status === 426) {
+      aside.on('click', () => {
+        window.location = '/dm-searching';
+      });
+    }
+    clearTimeout(timer);
+    $('body').removeClass('loading');
+    return;
+  }
+
+  total_searched += options.originalTweets.length;
+
+  var n = currentAPIState - options.limit * options.page;
+  $('progress').val(Math.round(100 - (100 / currentAPIState) * n + 1));
+
+  setStatus(
+    total_tweets + data.length,
+    total_searched,
+    options.originalTweets.length
+      ? options.originalTweets[options.originalTweets.length - 1].created_at
+      : null
+  );
+
+  // if there's no matched results, but there are raw Tweets, do another call - and keep going until we hit something
+  if (
+    data.length == 0 &&
+    total_tweets == 0 &&
+    options.originalTweets.length > 0
+  ) {
+    // check if we're doing a page max
+    updateLoading(type);
+    clearTimeout(timer);
+    timer = setTimeout(function() {
+      twitterlib.next();
+    }, 500);
+    return;
+  } else if (
+    total_tweets > 0 &&
+    data.length == 0 &&
+    options.originalTweets.length > 0 &&
+    pageMax > 0
+  ) {
+    pageMax--;
+    updateLoading(type);
+    clearTimeout(timer);
+    timer = setTimeout(function() {
+      twitterlib.next();
+    }, 500);
+    return;
+  }
+
+  if (total_tweets) {
+    $tweets.find('li:last').addClass('more'); // hard split line
+  }
+
+  var i = 0,
+    t,
+    scrollPos = null,
+    searches = filter.and.concat(filter.or).join('|');
+
+  for (i = 0; i < data.length; i++) {
+    t = twitterlib.render(data[i], i);
+    $tweets.append(t);
+
+    if (total_tweets == 0 && i == 0) {
+      $tweets.find('li:first').addClass('first');
+    }
+
+    // really tricky code here, we're finding *this* and all nested text nodes
+    // then replacing them with our new <strong>text</strong> elements
+    $tweets
+      .find('.entry-content:last, .entry-content:last *')
+      .contents()
+      .filter(function() {
+        return this.nodeName == '#text';
+      })
+      .each(function() {
+        // ignore blank lines
+        // make matches bold
+        var change = '';
+        if (/[^\s]/.test(this.nodeValue)) {
+          // encoding of entities happens here, so we need to reverse back out
+          change = this.nodeValue
+            .replace(/[<>&]/g, function(m) {
+              var r = '&amp;';
+              if (m == '<') {
+                r = '&lt;';
+              } else if (m == '>') {
+                r = '&gt;';
+              }
+              return r;
+            })
+            .replace(
+              new RegExp('(' + searches + ')', 'gi'),
+              '<strong>$1</strong>'
+            );
+          // need to convert this textNode to tags and text
+          $(this).replaceWith(change);
+        }
+      });
+  }
+
+  scrollPos = $tweets.find('li:last').offset().top;
+  if (scrollPos != null) {
+    setTimeout(function() {
+      $('html,body').animate({ scrollTop: scrollPos }, 500, function() {});
+    }, 100);
+  }
+
+  total_tweets += data.length;
+  pageMax = null;
+
+  $('body').removeClass('loading');
+
+  if (statusTop == null) {
+    statusTop =
+      $('#tweets aside').offset().top -
+      parseFloat(
+        $('#tweets aside')
+          .css('margin-top')
+          .replace(/auto/, 0)
+      );
+  }
+}
+
+/**
+ * Search form submitted
+ */
+$searchForm.submit(function(e) {
+  e.preventDefault();
+  if (!isLoggedIn()) {
+    window.location = '/auth/twitter';
+    return requestLogin();
+  }
+
+  var newState = $(this).serialize(),
+    type = $type.val(),
+    search = $search.val();
+
+  updateLoading(type);
+  screen_name = $('#screen_name').val() || user.screen_name;
+
+  $body
+    .removeClass('intro')
+    .removeClass('payment-options')
+    .addClass('results loading');
+  aside.removeAttr('data-error');
+
+  if (state === newState) {
+    clearTimeout(timer);
+    timer = setTimeout(function() {
+      if (type === 'dms') {
+        getDirectMessages(
+          { search: screen_name, filter: search, limit },
+          processTweets
+        );
+      } else {
+        twitterlib.cancel().next();
+      }
+    }, 250);
+    return;
+  }
+
+  resetDirectMessages();
+
+  state = newState;
+  try {
+    localStorage.setItem('screen_name', screen_name);
+  } catch (e) {
+    // nothing
+  }
+
+  var list;
+
+  if (screen_name.match(/\//)) {
+    type = 'list';
+    var parts = screen_name.split('/');
+    screen_name = parts.shift();
+    list = parts.join('/');
+    if (list.indexOf('lists/') === 0) {
+      list = parts.slice(1).join('/');
+    }
+  }
+
+  total_tweets = 0;
+  total_searched = 0;
+  $tweets.empty();
+
+  if (window.ga) {
+    ga('send', 'pageview', getPermalink(screen_name, type, search));
+  }
+
+  $tweets.append(
+    '<li class="searchterm">Searching <em><strong>' +
+      escapeTags(screen_name) +
+      '</strong>&rsquo;s ' +
+      type_string[type] +
+      '</em> for <strong>' +
+      escapeTags(search) +
+      '</strong></li>'
+  );
+  $('body').addClass('results');
+
+  if (type === 'dms') {
+    twitterlib.cancel();
+    getDirectMessages(
+      { search: screen_name, filter: search, limit },
+      processTweets
+    );
+    return;
+  }
+
+  // cancel any outstanding request, and kick off a new one
+  twitterlib.cancel();
+  twitterlib[type](
+    screen_name,
+    { filter: search, rts: true, limit: limit, list_name: list },
+    processTweets
+  );
+});
+
+$('input[type=reset]').click(function() {
+  $tweets.empty();
+});
+
+$('#logout').click(function() {
+  localStorage.clear();
+});
+
+/**
+ * Get started by requesting login
+ */
+var loggedIn = function(data) {
+  // set twitterlib token
+  $('#screen_name').val(data.profile.username);
+  $('.my-username').text(data.profile.username);
+  user = {
+    requestsLeft: data.requestsLeft,
+    screen_name: data.profile.username,
+  };
+  if (!data.pro) {
+    twitterlib.cache(false);
+  }
+  setupTwitterlib(data);
+
+  // Restore from permalink
+  if (window.location.pathname.length > 1) {
+    var path = window.location.pathname.substr(1),
+      segments = path.split('/');
+    if (segments[0]) {
+      $('#screen_name').val(decodeURIComponent(segments[0]));
+    }
+    if (segments[1]) {
+      $('#type').val(decodeURIComponent(segments[0]));
+    }
+    if (segments[2]) {
+      $('#search').val(decodeURIComponent(segments[2]));
+    }
+    $searchForm.submit();
+  }
+};
+
+$('button.upgrade').click(function(e) {
+  if (window.ga) {
+    ga('send', 'pageview', '/upgrade-enquiry');
+  }
+
+  // $('#charge button').click();
+  $('body')
+    .addClass('payment-options')
+    .removeClass('results');
+  e.preventDefault();
+});
+
+$('body').on('click', 'button.stripe-button-el', function() {
+  if (window.ga) {
+    ga('send', 'pageview', '/upgrade-enquiry');
+  }
+});
+
+requestLogin(loggedIn);

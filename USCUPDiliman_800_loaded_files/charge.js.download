@@ -1,0 +1,47 @@
+(function () {
+  var models = {
+    basic: 999,
+    pro: 2199,
+    prounlimited: 4999
+  };
+
+  var type = 'basic';
+
+  var handler = StripeCheckout.configure({
+    image: '/images/snapbird-stripe.png',
+    zipCode: true,
+    currency: 'usd',
+    key: $('#stripe-public-token').val(),
+    locale: 'auto',
+    name: 'Snapbird Search',
+    description: 'By Left Logic',
+    token: function(token) {
+      if (window.ga) {
+        ga('send', 'event', 'upgrade', 'complete', type, Math.round(models[type]/100));
+        ga('send', 'pageview', '/upgraded-' + type);
+      }
+      $('input#stripeToken').val(token.id);
+      $('input#email').val(token.email);
+      $('#charge').submit();
+    }
+  });
+
+  $('button').on('click', function (e) {
+    type = $(this).data('id');
+    if (!type) {
+      return;
+    }
+
+    if (window.ga) {
+      ga('send', 'pageview', '/upgrade-' + type);
+    }
+
+    var desc = $('#' + type).find('h2').text();
+    $('input#type').val(type);
+
+    handler.open({
+      amount: models[type],
+      name: 'Snapbird ' + desc,
+    });
+  });
+})();
